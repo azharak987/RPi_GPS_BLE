@@ -8,6 +8,19 @@ try:
 except ImportError:
     import gobject as GLib
 import sys
+import pynmea2
+import threading
+import time
+import serial
+# ... (existing imports and constants)
+
+# Global variables for GPS data
+LATITUDE = 37.7749  # Default: San Francisco
+LONGITUDE = -122.4194
+gps_lock = threading.Lock()
+
+# ... (existing classes: InvalidArgsException, NotSupportedException, Application, Service)
+
 
 BLUEZ_SERVICE_NAME = 'org.bluez'
 LE_ADVERTISING_MANAGER_IFACE = 'org.bluez.LEAdvertisingManager1'
@@ -178,9 +191,12 @@ class LocationCharacteristic(Characteristic):
             ['read', 'notify'],
             service)
         self.notifying = False
+        GLib.timeout_add(1000, self.notify_location)
 
     def get_location(self):
-        value = f"{LATITUDE},{LONGITUDE}".encode()
+        global LATITUDE, LONGITUDE
+        with gps_lock:
+            value = f"{LATITUDE},{LONGITUDE}".encode()
         return value
 
     def ReadValue(self, options):
@@ -198,6 +214,32 @@ class LocationCharacteristic(Characteristic):
             print('Not notifying, nothing to do')
             return
         self.notifying = False
+
+    def notify_location(self):
+        if not self.notifying:
+            return True
+        self.PropertiesChanged(
+            GATT_CHRC_IFACE,
+            {'Value': self.get_location()}, [])
+        return True
+
+# ... (existing classes: LocationService, Agent, Advertisement)
+
+def read_gps_data():
+    global LATITUDE, LONGITUDE
+    ser = serial.Serial('/dev/serial0', 9600, timeout=1)  # Adjust port as needed
+    while True:
+        try:
+            line = ser.readline().decode('ascii', errors='replace')
+            if line.startswith('$GPGGA'):
+                msg = pynmea2.parse(line)
+                with gps_lock:
+                    LATITUDE = msg.latitude
+                    LONGITUDE = msg.longitude
+                print(f"Updated GPS: {LATITUDE}, {LONGITUDE}")
+        except Exception as e:
+            print(f"Error reading GPS: {e}")
+        time.sleep(1)
 
 class LocationService(Service):
     def __init__(self, bus, index):
@@ -335,6 +377,10 @@ def main():
     ad_manager.RegisterAdvertisement(advertisement.get_path(), {},
                                      reply_handler=register_ad_cb,
                                      error_handler=register_ad_error_cb)
+
+    # Start GPS reading thread
+    gps_thread = threading.Thread(target=read_gps_data, daemon=True)
+    gps_thread.start()
 
     mainloop.run()
 
